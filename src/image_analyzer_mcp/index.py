@@ -78,6 +78,11 @@ def find_sub_image_boxes(
     h, w = img.shape[:2]
     channels = img.shape[2] if len(img.shape) > 2 else 1
 
+    if bg_mode == "transparent" and channels != 4:
+        raise ValueError(
+            f"bg_mode='transparent' が指定されましたが、画像にアルファチャンネルがありません (channels={channels})。"
+        )
+
     # マスクの作成
     if channels == 4 and (bg_mode in ("auto", "transparent")):
         # アルファチャンネルが0より大きい部分を物体とする
@@ -101,30 +106,55 @@ def find_sub_image_boxes(
         else:
             _, mask = cv2.threshold(gray, 15, 255, cv2.THRESH_BINARY)
 
-    # 近接パーツを結合するための膨張処理
+    # 近接パーツを結合するための膨張処理（連結成分の判定にのみ使用し、
+    # バウンディングボックス自体は元のマスクから測り直す）
     if padding > 0:
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (padding * 2 + 1, padding * 2 + 1))
         dilated_mask = cv2.dilate(mask, kernel, iterations=1)
     else:
         dilated_mask = mask
 
-    contours, _ = cv2.findContours(dilated_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    num_labels, labels = cv2.connectedComponents(dilated_mask)
 
     boxes = []
-    for c in contours:
-        x, y, bw, bh = cv2.boundingRect(c)
+    for label in range(1, num_labels):
+        ys, xs = np.where((labels == label) & (mask > 0))
+        if ys.size == 0:
+            continue
+        x, y = int(xs.min()), int(ys.min())
+        bw, bh = int(xs.max() - x + 1), int(ys.max() - y + 1)
         if bw >= min_size and bh >= min_size:
             boxes.append({
-                "x": int(x),
-                "y": int(y),
-                "width": int(bw),
-                "height": int(bh)
+                "x": x,
+                "y": y,
+                "width": bw,
+                "height": bh
             })
 
-    # 左上から順にソート（行ごとのブレを吸収するため平均高さの半分程度でクラスタリング）
-    avg_h = (sum(b["height"] for b in boxes) / len(boxes)) if boxes else 20
-    row_height = max(16, int(avg_h * 0.7))
-    boxes.sort(key=lambda b: (b["y"] // row_height, b["x"]))
+    # 左上から順にソート（各行の基準位置・高さに合わせて隣接する行を逐次クラスタリング）
+    boxes.sort(key=lambda b: (b["y"], b["x"]))
+
+    rows = []
+    current_row = []
+    row_top = None
+    row_height = None
+    for b in boxes:
+        if current_row and b["y"] > row_top + row_height * 0.7:
+            rows.append(current_row)
+            current_row = [b]
+            row_top = b["y"]
+            row_height = b["height"]
+        else:
+            current_row.append(b)
+            row_top = min(row_top, b["y"]) if row_top is not None else b["y"]
+            row_height = min(row_height, b["height"]) if row_height is not None else b["height"]
+    if current_row:
+        rows.append(current_row)
+
+    boxes = []
+    for row in rows:
+        row.sort(key=lambda b: b["x"])
+        boxes.extend(row)
 
     for idx, b in enumerate(boxes):
         b["index"] = idx
@@ -220,22 +250,29 @@ def crop_and_save_sub_images(
     h, w = img.shape[:2]
     os.makedirs(output_dir, exist_ok=True)
 
+    # prefix にディレクトリ区切りが含まれていても output_dir の外に書き出せないようにする
+    safe_prefix = os.path.basename(prefix) or "sub_image"
+
     saved_files = []
+    skipped = []
     for i, box in enumerate(boxes):
-        bx = max(0, int(box.get("x", 0)))
-        by = max(0, int(box.get("y", 0)))
+        raw_x = int(box.get("x", 0))
+        raw_y = int(box.get("y", 0))
         bw = int(box.get("width", 0))
         bh = int(box.get("height", 0))
 
-        # 範囲クリッピング
-        bx2 = min(w, bx + bw)
-        by2 = min(h, by + bh)
+        # 範囲クリッピング（負座標分は右端・下端を保ったまま切り詰める）
+        bx = max(0, raw_x)
+        by = max(0, raw_y)
+        bx2 = min(w, raw_x + bw)
+        by2 = min(h, raw_y + bh)
 
         if bx2 <= bx or by2 <= by:
+            skipped.append({"index": i, "reason": "out_of_bounds", "box": box})
             continue
 
         cropped = img[by:by2, bx:bx2]
-        filename = f"{prefix}_{i:03d}.png"
+        filename = f"{safe_prefix}_{i:03d}.png"
         out_path = os.path.join(output_dir, filename)
 
         if save_image_safely(out_path, cropped):
@@ -245,11 +282,15 @@ def crop_and_save_sub_images(
                 "width": int(bx2 - bx),
                 "height": int(by2 - by)
             })
+        else:
+            skipped.append({"index": i, "reason": "save_failed", "box": box})
 
     return {
         "saved_count": len(saved_files),
         "output_directory": os.path.abspath(output_dir),
-        "files": saved_files
+        "files": saved_files,
+        "skipped_count": len(skipped),
+        "skipped": skipped
     }
 
 def main():
