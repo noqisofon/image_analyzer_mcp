@@ -1,17 +1,22 @@
 import os
 import cv2
 import numpy as np
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Image, MCPServer
 
 mcp = MCPServer("Image Sprite Analyzer")
 
 def load_image_safely(image_path: str):
-    """Windowsの日本語パスにも対応した安全な画像読み込み"""
+    """Windowsの日本語パスにも対応した安全な画像読み込み。16bit画像は8bitに正規化します。"""
     if not os.path.isfile(image_path):
         return None
     try:
         data = np.fromfile(image_path, dtype=np.uint8)
-        return cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
+        img = cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
+        if img is None:
+            return None
+        if img.dtype == np.uint16:
+            img = (img >> 8).astype(np.uint8)
+        return img
     except Exception:
         return None
 
@@ -97,10 +102,40 @@ def find_sub_image_boxes(
             gray_target = int(0.299 * bg_color[0] + 0.587 * bg_color[1] + 0.114 * bg_color[2])
             diff = np.abs(img.astype(np.int16) - gray_target)
             mask = np.where(diff > tolerance, 255, 0).astype(np.uint8)
-    elif channels == 4 and (bg_mode in ("auto", "transparent")):
-        # アルファチャンネルが0より大きい部分を物体とする
+    elif bg_mode == "transparent":
+        # 明示的な透過指定: アルファチャンネルが0より大きい部分を物体とする
         alpha = img[:, :, 3]
         _, mask = cv2.threshold(alpha, 10, 255, cv2.THRESH_BINARY)
+    elif channels == 4 and bg_mode == "auto":
+        # 4チャンネルかつ auto の場合:
+        # 書き出し時の数画素のゴミに惑わされないよう、全画素中の透明画素(<=10)の割合が0.1%以上ある場合のみ透過背景と判定
+        alpha = img[:, :, 3]
+        trans_pixels = np.count_nonzero(alpha <= 10)
+        has_transparency = (trans_pixels / float(h * w)) >= 0.001
+        if has_transparency:
+            _, mask = cv2.threshold(alpha, 10, 255, cv2.THRESH_BINARY)
+        else:
+            # 不透明RGBAスプライトシート -> 色ベースの背景判定へフォールバック
+            corners = np.array([
+                img[0, 0, :3],
+                img[0, -1, :3],
+                img[-1, 0, :3],
+                img[-1, -1, :3]
+            ], dtype=np.int16)
+            corner_range = np.max(corners, axis=0) - np.min(corners, axis=0)
+            if int(np.max(corner_range)) <= tolerance:
+                bg_bgr = np.median(corners, axis=0)
+                diff = np.abs(img[:, :, :3].astype(np.int16) - bg_bgr)
+                dist = np.max(diff, axis=2)
+                mask = np.where(dist > tolerance, 255, 0).astype(np.uint8)
+            else:
+                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                corners_gray = [int(gray[0, 0]), int(gray[0, -1]), int(gray[-1, 0]), int(gray[-1, -1])]
+                is_light_bg = (sum(corners_gray) / 4) > 127
+                if is_light_bg:
+                    _, mask = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY_INV)
+                else:
+                    _, mask = cv2.threshold(gray, 15, 255, cv2.THRESH_BINARY)
     elif bg_mode == "white":
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if channels >= 3 else img
         _, mask = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY_INV)
@@ -151,19 +186,41 @@ def find_sub_image_boxes(
     num_labels, labels = cv2.connectedComponents(dilated_mask)
 
     boxes = []
-    for label in range(1, num_labels):
-        ys, xs = np.where((labels == label) & (mask > 0))
-        if ys.size == 0:
-            continue
-        x, y = int(xs.min()), int(ys.min())
-        bw, bh = int(xs.max() - x + 1), int(ys.max() - y + 1)
-        if bw >= min_size and bh >= min_size:
-            boxes.append({
-                "x": x,
-                "y": y,
-                "width": bw,
-                "height": bh
-            })
+    if num_labels > 1:
+        # 元マスクの前景画素 (mask > 0) のみを取り出してラベルごとに一括集計（高速化）
+        ys, xs = np.nonzero(mask)
+        if ys.size > 0:
+            fg_labels = labels[ys, xs]
+            valid = fg_labels > 0
+            if np.any(valid):
+                ys = ys[valid]
+                xs = xs[valid]
+                fg_labels = fg_labels[valid]
+
+                min_x = np.full(num_labels, w, dtype=np.int32)
+                max_x = np.full(num_labels, -1, dtype=np.int32)
+                min_y = np.full(num_labels, h, dtype=np.int32)
+                max_y = np.full(num_labels, -1, dtype=np.int32)
+
+                np.minimum.at(min_x, fg_labels, xs)
+                np.maximum.at(max_x, fg_labels, xs)
+                np.minimum.at(min_y, fg_labels, ys)
+                np.maximum.at(max_y, fg_labels, ys)
+
+                for label in range(1, num_labels):
+                    if max_x[label] < 0:
+                        continue
+                    x = int(min_x[label])
+                    y = int(min_y[label])
+                    bw = int(max_x[label] - x + 1)
+                    bh = int(max_y[label] - y + 1)
+                    if bw >= min_size and bh >= min_size:
+                        boxes.append({
+                            "x": x,
+                            "y": y,
+                            "width": bw,
+                            "height": bh
+                        })
 
     # 左上から順にソート（各行の基準位置・高さに合わせて隣接する行を逐次クラスタリング）
     boxes.sort(key=lambda b: (b["y"], b["x"]))
@@ -289,6 +346,7 @@ def crop_and_save_sub_images(
 
     saved_files = []
     skipped = []
+    used_filenames = set()
     for i, box in enumerate(boxes):
         raw_x = int(box.get("x", 0))
         raw_y = int(box.get("y", 0))
@@ -306,12 +364,29 @@ def crop_and_save_sub_images(
             continue
 
         cropped = img[by:by2, bx:bx2]
-        filename = f"{safe_prefix}_{i:03d}.png"
+
+        # box の index を優先使用し、数値化できない場合は i にフォールバック
+        raw_idx = box.get("index", i)
+        try:
+            file_idx = int(raw_idx)
+            base_filename = f"{safe_prefix}_{file_idx:03d}.png"
+        except (ValueError, TypeError):
+            base_filename = f"{safe_prefix}_{i:03d}.png"
+
+        # ファイル名重複時の衝突回避 (_dup1, _dup2 ...)
+        filename = base_filename
+        dup_count = 1
+        while filename in used_filenames:
+            stem, ext = os.path.splitext(base_filename)
+            filename = f"{stem}_dup{dup_count}{ext}"
+            dup_count += 1
+        used_filenames.add(filename)
+
         out_path = os.path.join(output_dir, filename)
 
         if save_image_safely(out_path, cropped):
             saved_files.append({
-                "index": i,
+                "index": raw_idx,
                 "path": out_path,
                 "width": int(bx2 - bx),
                 "height": int(by2 - by)
@@ -333,8 +408,9 @@ def preview_boxes(
     boxes: list[dict],
     output_path: str | None = None,
     line_thickness: int = 2,
-    show_labels: bool = True
-) -> dict:
+    show_labels: bool = True,
+    as_image: bool = False
+) -> dict | Image:
     """
     画像上にバウンディングボックス（矩形枠とインデックス番号ラベル）を描画し、プレビュー画像を生成・保存します。
     検出結果やグリッド分割の確認・デバッグに利用できます。
@@ -345,6 +421,7 @@ def preview_boxes(
         output_path: プレビュー画像の保存先パス。省略時は元画像と同ディレクトリの '{basename}_preview.png'
         line_thickness: 描画する矩形枠の線の太さ(px)
         show_labels: インデックス番号ラベルを描画するかどうか
+        as_image: True の場合、MCP クライアントでインライン表示可能な Image オブジェクトを返します
     """
     img = load_image_safely(image_path)
     if img is None:
@@ -353,7 +430,12 @@ def preview_boxes(
     h, w = img.shape[:2]
     channels = img.shape[2] if len(img.shape) > 2 else 1
 
-    preview = img.copy()
+    # グレースケールまたは 1 チャンネル画像の場合は枠線を鮮明に描画できるように BGR に変換
+    if channels == 1 or (len(img.shape) == 3 and img.shape[2] == 1):
+        preview = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        channels = 3
+    else:
+        preview = img.copy()
 
     box_color = (0, 255, 0, 255) if channels == 4 else (0, 255, 0)
     label_bg_color = (0, 0, 0, 200) if channels == 4 else (0, 0, 0)
@@ -406,6 +488,9 @@ def preview_boxes(
     if not save_image_safely(output_path, preview):
         raise IOError(f"プレビュー画像の保存に失敗しました: {output_path}")
 
+    if as_image:
+        return Image(path=output_path)
+
     return {
         "preview_path": os.path.abspath(output_path),
         "drawn_boxes_count": drawn_count,
@@ -422,8 +507,9 @@ def view_region(
     height: int = 0,
     box: dict | None = None,
     scale: float = 1.0,
-    output_path: str | None = None
-) -> dict:
+    output_path: str | None = None,
+    as_image: bool = False
+) -> dict | Image:
     """
     画像の指定された矩形領域を切り出し、必要に応じて拡大（scale）してプレビュー画像として保存します。
     特定のスプライトや細かいパーツの詳細確認に利用できます。
@@ -437,6 +523,7 @@ def view_region(
         box: バウンディングボックス dict (x, y, width, height)。指定された場合は個別座標より優先
         scale: 拡大倍率 (例: 2.0 で 2倍、4.0 で 4倍。最近傍補間でドット絵もぼやけず拡大)
         output_path: 保存先パス。省略時は元画像と同ディレクトリの '{basename}_region_{x}_{y}.png'
+        as_image: True の場合、MCP クライアントでインライン表示可能な Image オブジェクトを返します
     """
     img = load_image_safely(image_path)
     if img is None:
@@ -482,6 +569,9 @@ def view_region(
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
     if not save_image_safely(output_path, cropped):
         raise IOError(f"領域画像の保存に失敗しました: {output_path}")
+
+    if as_image:
+        return Image(path=output_path)
 
     return {
         "region_path": os.path.abspath(output_path),

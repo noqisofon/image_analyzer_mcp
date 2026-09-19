@@ -264,3 +264,115 @@ def test_view_region_box_dict_and_validation(tmp_path):
         view_region(path, x=0, y=0, width=10, height=10, scale=-1.0)
 
 
+def test_16bit_png_normalization_and_detection(tmp_path):
+    # 16-bit Grayscale PNG (uint16)
+    img16 = np.zeros((60, 60), dtype=np.uint16)
+    img16[15:35, 15:35] = 65000  # 白に近い
+    path16 = _save(tmp_path, img16, "test16_gray.png")
+
+    res = find_sub_image_boxes(path16, min_size=5, bg_mode="auto")
+    assert res["count"] == 1
+    box = res["boxes"][0]
+    assert (box["x"], box["y"], box["width"], box["height"]) == (15, 15, 20, 20)
+
+    # 16-bit RGBA PNG
+    img16_rgba = np.zeros((60, 60, 4), dtype=np.uint16)
+    img16_rgba[15:35, 15:35] = (65535, 65535, 65535, 65535)
+    path16_rgba = _save(tmp_path, img16_rgba, "test16_rgba.png")
+
+    res_rgba = find_sub_image_boxes(path16_rgba, min_size=5, bg_mode="auto")
+    assert res_rgba["count"] == 1
+    assert res_rgba["boxes"][0]["width"] == 20
+
+
+def test_opaque_rgba_with_solid_background_fallback(tmp_path):
+    # 4チャンネル (RGBA) だがアルファが全面不透明 (255) で背景が白 (255, 255, 255)
+    # スプライトとして黒い四角を2つ配置
+    img = np.full((100, 100, 4), 255, dtype=np.uint8)
+    img[10:30, 10:30, :3] = 0  # sprite 1 (black)
+    img[50:70, 50:70, :3] = 0  # sprite 2 (black)
+    path = _save(tmp_path, img, "opaque_rgba.png")
+
+    # bg_mode="auto" で全面1つの巨大boxにならず、2つのスプライトが検出されること
+    res = find_sub_image_boxes(path, min_size=5, bg_mode="auto")
+    assert res["count"] == 2
+    assert res["boxes"][0]["width"] == 20
+    assert res["boxes"][1]["width"] == 20
+
+
+def test_opaque_rgba_with_garbage_transparent_pixels(tmp_path):
+    # 100x100 (10000ピクセル) 中、書き出しゴミとして5ピクセルだけアルファ=0が存在 (0.05% < 0.1%)
+    img = np.full((100, 100, 4), 255, dtype=np.uint8)
+    img[10:30, 10:30, :3] = 0  # sprite
+    img[0, 0:5, 3] = 0         # 5ピクセルの透明ゴミ
+    path = _save(tmp_path, img, "garbage_rgba.png")
+
+    # 0.1% 未満のゴミに惑わされず色ベース判定にフォールバックすること
+    res = find_sub_image_boxes(path, min_size=5, bg_mode="auto")
+    assert res["count"] == 1
+    assert res["boxes"][0]["width"] == 20
+
+
+def test_crop_index_preservation_and_collision_resolution(tmp_path):
+    img = np.full((100, 100, 3), 200, dtype=np.uint8)
+    path = _save(tmp_path, img, "crop_src.png")
+    out_dir = tmp_path / "crop_out"
+
+    # index 3 と 7 を指定、さらに衝突テスト用に index 3 をもう1つ、数値化不可を1つ追加
+    boxes = [
+        {"x": 10, "y": 10, "width": 10, "height": 10, "index": 3},
+        {"x": 30, "y": 30, "width": 10, "height": 10, "index": 7},
+        {"x": 50, "y": 50, "width": 10, "height": 10, "index": 3},  # 重複
+        {"x": 70, "y": 70, "width": 10, "height": 10, "index": "invalid"},  # 数値化不可
+    ]
+
+    res = crop_and_save_sub_images(path, boxes, output_dir=str(out_dir), prefix="sprite")
+
+    assert res["saved_count"] == 4
+    filenames = [os.path.basename(f["path"]) for f in res["files"]]
+    assert filenames == [
+        "sprite_003.png",
+        "sprite_007.png",
+        "sprite_003_dup1.png",
+        "sprite_003_dup2.png",
+    ]
+    assert len(set(filenames)) == 4
+
+
+def test_preview_boxes_grayscale_color_boxes(tmp_path):
+    # 1チャンネル (H, W) グレースケール画像
+    gray = np.zeros((60, 60), dtype=np.uint8)
+    path = _save(tmp_path, gray, "gray.png")
+
+    boxes = [{"x": 10, "y": 10, "width": 20, "height": 20, "index": 0}]
+    res = preview_boxes(path, boxes, show_labels=False)
+
+    preview_img = cv2.imread(res["preview_path"])
+    # 出力は 3 チャンネル (BGR) に変換されていること
+    assert len(preview_img.shape) == 3 and preview_img.shape[2] == 3
+
+    # 枠線 (10, 10) のピクセルが緑 (BGR: 0, 255, 0) であること (黒 0 ではないこと)
+    pixel = preview_img[10, 10]
+    assert pixel[1] > 200  # G が高い
+    assert pixel[0] == 0 and pixel[2] == 0  # B, R は 0
+
+
+def test_as_image_return(tmp_path):
+    img = np.full((50, 50, 3), 128, dtype=np.uint8)
+    path = _save(tmp_path, img, "as_image_src.png")
+
+    res_preview = preview_boxes(
+        path,
+        boxes=[{"x": 5, "y": 5, "width": 10, "height": 10}],
+        as_image=True
+    )
+    # Image オブジェクトが返ること
+    assert hasattr(res_preview, "path")
+    assert os.path.isfile(res_preview.path)
+
+    res_region = view_region(path, x=5, y=5, width=10, height=10, as_image=True)
+    assert hasattr(res_region, "path")
+    assert os.path.isfile(res_region.path)
+
+
+

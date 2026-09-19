@@ -30,8 +30,8 @@ AI エージェント（Antigravity、Claude 等）が画像の全体サイズ�
 | `find_sub_image_boxes`     | スプライト・コラージュ要素の境界ボックスを検出 | `image_path`, `min_size` (最小サイズpx), `padding` (結合サイズpx), `bg_mode` (`auto`, `transparent`, `white`, `black`, `color`), `bg_color` ([R, G, B]), `tolerance` (許容色差) |
 | `get_grid_boxes`           | 等間隔スプライトシートのグリッド分割           | `image_path`, `rows`/`cols` または `tile_width`/`tile_height`, `margin_x`, `margin_y`, `spacing_x`, `spacing_y`        |
 | `crop_and_save_sub_images` | ボックス範囲で切り出して連番保存               | `image_path`, `boxes`, `output_dir`, `prefix`                                                                          |
-| `preview_boxes`            | 検出ボックスを画像上に枠線・ラベル付き描画     | `image_path`, `boxes`, `output_path`, `line_thickness`, `show_labels`                                                  |
-| `view_region`              | 指定領域を切り出し・拡大プレビュー保存         | `image_path`, `x`/`y`/`width`/`height` または `box`, `scale`, `output_path`                                            |
+| `preview_boxes`            | 検出ボックスを画像上に枠線・ラベル付き描画     | `image_path`, `boxes`, `output_path`, `line_thickness`, `show_labels`, `as_image` (Image返却)          |
+| `view_region`              | 指定領域を切り出し・拡大プレビュー保存         | `image_path`, `x`/`y`/`width`/`height` または `box`, `scale`, `output_path`, `as_image` (Image返却)    |
 
 
 ---

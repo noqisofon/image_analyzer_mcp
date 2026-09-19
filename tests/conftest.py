@@ -28,7 +28,14 @@ def _install_fake_mcp():
         def run(self, *args, **kwargs):
             pass
 
+    class _FakeImage:
+        def __init__(self, path=None, data=None, format=None):
+            self.path = path
+            self.data = data
+            self.format = format
+
     mcpserver_mod.MCPServer = _FakeMCPServer
+    mcpserver_mod.Image = _FakeImage
     mcp_mod.server = server_mod
     server_mod.mcpserver = mcpserver_mod
 
