@@ -1,8 +1,10 @@
+import os
+
 import cv2
 import numpy as np
 import pytest
 
-from image_analyzer_mcp.index import find_sub_image_boxes
+from image_analyzer_mcp.index import crop_and_save_sub_images, find_sub_image_boxes
 
 
 def _save(tmp_path, img, name="test.png"):
@@ -83,3 +85,60 @@ def test_transparent_mode_with_alpha_still_works(tmp_path):
     result = find_sub_image_boxes(path, min_size=1, bg_mode="transparent")
 
     assert result["count"] == 1
+
+
+def test_crop_negative_coordinates_are_clipped_not_shifted(tmp_path):
+    # x=-5, width=10 の場合、画像内に見えているのは x=0..5 の範囲のみのはず。
+    img = np.full((50, 50, 3), 255, dtype=np.uint8)
+    path = _save(tmp_path, img)
+    out_dir = tmp_path / "out"
+
+    result = crop_and_save_sub_images(
+        path,
+        boxes=[{"x": -5, "y": 0, "width": 10, "height": 10}],
+        output_dir=str(out_dir),
+    )
+
+    assert result["saved_count"] == 1
+    saved = result["files"][0]
+    assert saved["width"] == 5
+    assert saved["height"] == 10
+
+
+def test_crop_prefix_cannot_escape_output_dir(tmp_path):
+    img = np.full((50, 50, 3), 255, dtype=np.uint8)
+    path = _save(tmp_path, img)
+    out_dir = tmp_path / "out"
+    escape_target = tmp_path / "evil_000.png"
+
+    result = crop_and_save_sub_images(
+        path,
+        boxes=[{"x": 0, "y": 0, "width": 10, "height": 10}],
+        output_dir=str(out_dir),
+        prefix="../evil",
+    )
+
+    assert result["saved_count"] == 1
+    saved_path = result["files"][0]["path"]
+    assert os.path.commonpath([saved_path, str(out_dir)]) == str(out_dir)
+    assert not escape_target.exists()
+
+
+def test_crop_out_of_range_box_is_reported_as_skipped(tmp_path):
+    img = np.full((50, 50, 3), 255, dtype=np.uint8)
+    path = _save(tmp_path, img)
+    out_dir = tmp_path / "out"
+
+    result = crop_and_save_sub_images(
+        path,
+        boxes=[
+            {"x": 0, "y": 0, "width": 10, "height": 10},
+            {"x": 1000, "y": 1000, "width": 10, "height": 10},
+        ],
+        output_dir=str(out_dir),
+    )
+
+    assert result["saved_count"] == 1
+    assert result["skipped_count"] == 1
+    assert result["skipped"][0]["index"] == 1
+    assert result["skipped"][0]["reason"] == "out_of_bounds"

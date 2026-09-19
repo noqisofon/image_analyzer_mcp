@@ -250,22 +250,29 @@ def crop_and_save_sub_images(
     h, w = img.shape[:2]
     os.makedirs(output_dir, exist_ok=True)
 
+    # prefix にディレクトリ区切りが含まれていても output_dir の外に書き出せないようにする
+    safe_prefix = os.path.basename(prefix) or "sub_image"
+
     saved_files = []
+    skipped = []
     for i, box in enumerate(boxes):
-        bx = max(0, int(box.get("x", 0)))
-        by = max(0, int(box.get("y", 0)))
+        raw_x = int(box.get("x", 0))
+        raw_y = int(box.get("y", 0))
         bw = int(box.get("width", 0))
         bh = int(box.get("height", 0))
 
-        # 範囲クリッピング
-        bx2 = min(w, bx + bw)
-        by2 = min(h, by + bh)
+        # 範囲クリッピング（負座標分は右端・下端を保ったまま切り詰める）
+        bx = max(0, raw_x)
+        by = max(0, raw_y)
+        bx2 = min(w, raw_x + bw)
+        by2 = min(h, raw_y + bh)
 
         if bx2 <= bx or by2 <= by:
+            skipped.append({"index": i, "reason": "out_of_bounds", "box": box})
             continue
 
         cropped = img[by:by2, bx:bx2]
-        filename = f"{prefix}_{i:03d}.png"
+        filename = f"{safe_prefix}_{i:03d}.png"
         out_path = os.path.join(output_dir, filename)
 
         if save_image_safely(out_path, cropped):
@@ -275,11 +282,15 @@ def crop_and_save_sub_images(
                 "width": int(bx2 - bx),
                 "height": int(by2 - by)
             })
+        else:
+            skipped.append({"index": i, "reason": "save_failed", "box": box})
 
     return {
         "saved_count": len(saved_files),
         "output_directory": os.path.abspath(output_dir),
-        "files": saved_files
+        "files": saved_files,
+        "skipped_count": len(skipped),
+        "skipped": skipped
     }
 
 def main():
