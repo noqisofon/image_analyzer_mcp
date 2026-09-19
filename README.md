@@ -13,7 +13,11 @@ AI エージェント（Antigravity、Claude 等）が画像の全体サイズ�
    - ゲームスプライトシートなどの規則的なタイル配置をグリッド分割（行・列数指定 または タイル幅・高さ指定）。
 4. **`crop_and_save_sub_images`**:
    - 検出・指定したバウンディングボックスを元に、個別の画像を切り出して連番で指定フォルダに保存。
-5. **マルチプラットフォーム対応**:
+5. **`preview_boxes`**:
+   - 検出したバウンディングボックスを画像上に枠線およびインデックス番号付きで描画し、可視化プレビュー画像を生成。
+6. **`view_region`**:
+   - 指定した領域（座標または box）を切り出し、必要に応じて拡大（scale）して確認用画像を保存。
+7. **マルチプラットフォーム対応**:
    - Windows 環境での日本語を含むファイルパスにも対応。
 
 ---
@@ -23,9 +27,12 @@ AI エージェント（Antigravity、Claude 等）が画像の全体サイズ�
 | ツール名                   | 説明                                           | 主なパラメータ                                                                                                         |
 | -------------------------- | ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
 | `get_image_info`           | 画像の全体サイズやメタデータを取得             | `image_path`                                                                                                           |
-| `find_sub_image_boxes`     | スプライト・コラージュ要素の境界ボックスを検出 | `image_path`, `min_size` (最小サイズpx), `padding` (結合サイズpx), `bg_mode` (`auto`, `transparent`, `white`, `black`) |
+| `find_sub_image_boxes`     | スプライト・コラージュ要素の境界ボックスを検出 | `image_path`, `min_size` (最小サイズpx), `padding` (結合サイズpx), `bg_mode` (`auto`, `transparent`, `white`, `black`, `color`), `bg_color` ([R, G, B]), `tolerance` (許容色差) |
 | `get_grid_boxes`           | 等間隔スプライトシートのグリッド分割           | `image_path`, `rows`/`cols` または `tile_width`/`tile_height`, `margin_x`, `margin_y`, `spacing_x`, `spacing_y`        |
 | `crop_and_save_sub_images` | ボックス範囲で切り出して連番保存               | `image_path`, `boxes`, `output_dir`, `prefix`                                                                          |
+| `preview_boxes`            | 検出ボックスを画像上に枠線・ラベル付き描画     | `image_path`, `boxes`, `output_path`, `line_thickness`, `show_labels`                                                  |
+| `view_region`              | 指定領域を切り出し・拡大プレビュー保存         | `image_path`, `x`/`y`/`width`/`height` または `box`, `scale`, `output_path`                                            |
+
 
 ---
 
