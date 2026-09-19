@@ -183,44 +183,36 @@ def find_sub_image_boxes(
     else:
         dilated_mask = mask
 
-    num_labels, labels = cv2.connectedComponents(dilated_mask)
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(dilated_mask)
 
     boxes = []
-    if num_labels > 1:
-        # 元マスクの前景画素 (mask > 0) のみを取り出してラベルごとに一括集計（高速化）
-        ys, xs = np.nonzero(mask)
-        if ys.size > 0:
-            fg_labels = labels[ys, xs]
-            valid = fg_labels > 0
-            if np.any(valid):
-                ys = ys[valid]
-                xs = xs[valid]
-                fg_labels = fg_labels[valid]
+    for label in range(1, num_labels):
+        rx = int(stats[label, cv2.CC_STAT_LEFT])
+        ry = int(stats[label, cv2.CC_STAT_TOP])
+        rw = int(stats[label, cv2.CC_STAT_WIDTH])
+        rh = int(stats[label, cv2.CC_STAT_HEIGHT])
 
-                min_x = np.full(num_labels, w, dtype=np.int32)
-                max_x = np.full(num_labels, -1, dtype=np.int32)
-                min_y = np.full(num_labels, h, dtype=np.int32)
-                max_y = np.full(num_labels, -1, dtype=np.int32)
+        # 各連結成分のROI内でのみ元マスクの前景画素を抽出（密な画像でも極めて高速・省メモリ）
+        roi_mask = mask[ry:ry+rh, rx:rx+rw]
+        roi_labels = labels[ry:ry+rh, rx:rx+rw]
 
-                np.minimum.at(min_x, fg_labels, xs)
-                np.maximum.at(max_x, fg_labels, xs)
-                np.minimum.at(min_y, fg_labels, ys)
-                np.maximum.at(max_y, fg_labels, ys)
+        ys, xs = np.nonzero((roi_labels == label) & (roi_mask > 0))
+        if ys.size == 0:
+            continue
 
-                for label in range(1, num_labels):
-                    if max_x[label] < 0:
-                        continue
-                    x = int(min_x[label])
-                    y = int(min_y[label])
-                    bw = int(max_x[label] - x + 1)
-                    bh = int(max_y[label] - y + 1)
-                    if bw >= min_size and bh >= min_size:
-                        boxes.append({
-                            "x": x,
-                            "y": y,
-                            "width": bw,
-                            "height": bh
-                        })
+        # ROI座標から元画像座標へオフセットを加算
+        x = int(rx + xs.min())
+        y = int(ry + ys.min())
+        bw = int(xs.max() - xs.min() + 1)
+        bh = int(ys.max() - ys.min() + 1)
+
+        if bw >= min_size and bh >= min_size:
+            boxes.append({
+                "x": x,
+                "y": y,
+                "width": bw,
+                "height": bh
+            })
 
     # 左上から順にソート（各行の基準位置・高さに合わせて隣接する行を逐次クラスタリング）
     boxes.sort(key=lambda b: (b["y"], b["x"]))
@@ -329,10 +321,18 @@ def crop_and_save_sub_images(
     image_path: str,
     boxes: list[dict],
     output_dir: str,
-    prefix: str = "sub_image"
+    prefix: str = "sub_image",
+    overwrite: bool = False
 ) -> dict:
     """
     検出・指定したバウンディングボックスのリストを元に、元画像から個別の画像を切り出して指定ディレクトリに保存します。
+
+    Parameters:
+        image_path: 解析する画像ファイルのパス
+        boxes: 切り出すバウンディングボックスのリスト
+        output_dir: 切り出した画像の保存先ディレクトリ
+        prefix: 保存する画像ファイル名の接頭辞
+        overwrite: 既存ファイルが存在する場合に上書きするかどうか。False の場合は _dup 連番を付与して安全に別名保存
     """
     img = load_image_safely(image_path)
     if img is None:
@@ -347,6 +347,11 @@ def crop_and_save_sub_images(
     saved_files = []
     skipped = []
     used_filenames = set()
+
+    # overwrite=False の場合、出力先ディレクトリに既に存在するファイルも衝突対象に含める
+    if not overwrite and os.path.isdir(output_dir):
+        used_filenames.update(os.listdir(output_dir))
+
     for i, box in enumerate(boxes):
         raw_x = int(box.get("x", 0))
         raw_y = int(box.get("y", 0))
@@ -365,10 +370,14 @@ def crop_and_save_sub_images(
 
         cropped = img[by:by2, bx:bx2]
 
-        # box の index を優先使用し、数値化できない場合は i にフォールバック
+        # box の index を優先使用。負数、非整数 float、数値化不可の場合はループインデックス i に安全にフォールバック
         raw_idx = box.get("index", i)
         try:
+            if isinstance(raw_idx, float) and not raw_idx.is_integer():
+                raise ValueError("non-integer float")
             file_idx = int(raw_idx)
+            if file_idx < 0:
+                raise ValueError("negative index")
             base_filename = f"{safe_prefix}_{file_idx:03d}.png"
         except (ValueError, TypeError):
             base_filename = f"{safe_prefix}_{i:03d}.png"

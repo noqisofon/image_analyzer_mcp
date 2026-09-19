@@ -12,6 +12,14 @@ def _install_fake_mcp():
     if "mcp.server.mcpserver" in sys.modules:
         return
 
+    try:
+        from mcp.server.mcpserver import Image, MCPServer
+        # 本物の mcp が正常にインポート・初期化できる環境では本物を使用
+        _test_srv = MCPServer("test_verify")
+        return
+    except Exception:
+        pass
+
     mcp_mod = types.ModuleType("mcp")
     server_mod = types.ModuleType("mcp.server")
     mcpserver_mod = types.ModuleType("mcp.server.mcpserver")

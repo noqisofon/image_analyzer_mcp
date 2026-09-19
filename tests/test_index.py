@@ -318,25 +318,50 @@ def test_crop_index_preservation_and_collision_resolution(tmp_path):
     path = _save(tmp_path, img, "crop_src.png")
     out_dir = tmp_path / "crop_out"
 
-    # index 3 と 7 を指定、さらに衝突テスト用に index 3 をもう1つ、数値化不可を1つ追加
+    # index 3 と 7 を指定、さらに衝突用 index 3、負数(-1)、小数(3.9)、文字列("invalid")を追加
     boxes = [
         {"x": 10, "y": 10, "width": 10, "height": 10, "index": 3},
         {"x": 30, "y": 30, "width": 10, "height": 10, "index": 7},
-        {"x": 50, "y": 50, "width": 10, "height": 10, "index": 3},  # 重複
-        {"x": 70, "y": 70, "width": 10, "height": 10, "index": "invalid"},  # 数値化不可
+        {"x": 50, "y": 50, "width": 10, "height": 10, "index": 3},     # 重複 -> _dup1
+        {"x": 10, "y": 70, "width": 10, "height": 10, "index": -1},    # 負数 -> i=3 -> 重複(_dup2)
+        {"x": 30, "y": 70, "width": 10, "height": 10, "index": 3.9},   # 小数 -> i=4 -> sprite_004
+        {"x": 50, "y": 70, "width": 10, "height": 10, "index": "bad"},  # 不正文字列 -> i=5 -> sprite_005
     ]
 
     res = crop_and_save_sub_images(path, boxes, output_dir=str(out_dir), prefix="sprite")
 
-    assert res["saved_count"] == 4
+    assert res["saved_count"] == 6
     filenames = [os.path.basename(f["path"]) for f in res["files"]]
     assert filenames == [
         "sprite_003.png",
         "sprite_007.png",
         "sprite_003_dup1.png",
         "sprite_003_dup2.png",
+        "sprite_004.png",
+        "sprite_005.png",
     ]
-    assert len(set(filenames)) == 4
+    assert len(set(filenames)) == 6
+
+    # 2回目の実行 (overwrite=False: デフォルト): ディスク上の既存ファイルと衝突せず _dup が付くこと
+    res_second = crop_and_save_sub_images(
+        path,
+        boxes=[{"x": 10, "y": 10, "width": 10, "height": 10, "index": 3}],
+        output_dir=str(out_dir),
+        prefix="sprite"
+    )
+    second_filename = os.path.basename(res_second["files"][0]["path"])
+    assert second_filename == "sprite_003_dup3.png"
+
+    # 3回目の実行 (overwrite=True): 既存ファイルに直接上書きされること
+    res_overwrite = crop_and_save_sub_images(
+        path,
+        boxes=[{"x": 10, "y": 10, "width": 10, "height": 10, "index": 3}],
+        output_dir=str(out_dir),
+        prefix="sprite",
+        overwrite=True
+    )
+    overwrite_filename = os.path.basename(res_overwrite["files"][0]["path"])
+    assert overwrite_filename == "sprite_003.png"
 
 
 def test_preview_boxes_grayscale_color_boxes(tmp_path):
@@ -373,6 +398,56 @@ def test_as_image_return(tmp_path):
     res_region = view_region(path, x=5, y=5, width=10, height=10, as_image=True)
     assert hasattr(res_region, "path")
     assert os.path.isfile(res_region.path)
+
+
+def _reference_find_boxes(mask, padding, min_size):
+    """旧実装（全画素走査方式）による基準バウンディングボックス計算"""
+    if padding > 0:
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (padding * 2 + 1, padding * 2 + 1))
+        dilated_mask = cv2.dilate(mask, kernel, iterations=1)
+    else:
+        dilated_mask = mask
+
+    num_labels, labels = cv2.connectedComponents(dilated_mask)
+    boxes = []
+    for label in range(1, num_labels):
+        ys, xs = np.where((labels == label) & (mask > 0))
+        if ys.size == 0:
+            continue
+        x, y = int(xs.min()), int(ys.min())
+        bw, bh = int(xs.max() - x + 1), int(ys.max() - y + 1)
+        if bw >= min_size and bh >= min_size:
+            boxes.append({"x": x, "y": y, "width": bw, "height": bh})
+    return sorted(boxes, key=lambda b: (b["y"], b["x"]))
+
+
+def test_roi_consistency_with_reference(tmp_path):
+    # ランダムなスプライトを多数配置し、ROI 方式と旧実装の出力が 100% 一致することを検証
+    np.random.seed(42)
+    img = np.zeros((300, 300, 4), dtype=np.uint8)
+    for _ in range(30):
+        w = np.random.randint(8, 25)
+        h = np.random.randint(8, 25)
+        x = np.random.randint(0, 300 - w)
+        y = np.random.randint(0, 300 - h)
+        img[y:y+h, x:x+w] = (255, 255, 255, 255)
+
+    path = _save(tmp_path, img, "roi_test.png")
+
+    for pad in [0, 1, 3]:
+        roi_result = find_sub_image_boxes(path, min_size=8, padding=pad)
+        alpha = img[:, :, 3]
+        _, mask = cv2.threshold(alpha, 10, 255, cv2.THRESH_BINARY)
+        ref_boxes = _reference_find_boxes(mask, padding=pad, min_size=8)
+
+        # 個数の一致
+        assert roi_result["count"] == len(ref_boxes)
+        # 全ボックスの座標とサイズの一致
+        roi_sorted = sorted(roi_result["boxes"], key=lambda b: (b["y"], b["x"]))
+        for b_roi, b_ref in zip(roi_sorted, ref_boxes):
+            assert (b_roi["x"], b_roi["y"], b_roi["width"], b_roi["height"]) == \
+                   (b_ref["x"], b_ref["y"], b_ref["width"], b_ref["height"])
+
 
 
 
