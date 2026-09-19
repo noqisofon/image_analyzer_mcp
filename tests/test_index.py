@@ -318,29 +318,31 @@ def test_crop_index_preservation_and_collision_resolution(tmp_path):
     path = _save(tmp_path, img, "crop_src.png")
     out_dir = tmp_path / "crop_out"
 
-    # index 3 と 7 を指定、さらに衝突用 index 3、負数(-1)、小数(3.9)、文字列("invalid")を追加
+    # index 3 と 7、衝突用 index 3、負数(-1)、小数(3.9)、文字列("bad")、そして正規の index 5 を追加
     boxes = [
         {"x": 10, "y": 10, "width": 10, "height": 10, "index": 3},
         {"x": 30, "y": 30, "width": 10, "height": 10, "index": 7},
         {"x": 50, "y": 50, "width": 10, "height": 10, "index": 3},     # 重複 -> _dup1
-        {"x": 10, "y": 70, "width": 10, "height": 10, "index": -1},    # 負数 -> i=3 -> 重複(_dup2)
-        {"x": 30, "y": 70, "width": 10, "height": 10, "index": 3.9},   # 小数 -> i=4 -> sprite_004
-        {"x": 50, "y": 70, "width": 10, "height": 10, "index": "bad"},  # 不正文字列 -> i=5 -> sprite_005
+        {"x": 10, "y": 70, "width": 10, "height": 10, "index": -1},    # 負数 -> _i003
+        {"x": 30, "y": 70, "width": 10, "height": 10, "index": 3.9},   # 小数 -> _i004
+        {"x": 50, "y": 70, "width": 10, "height": 10, "index": "bad"},  # 不正文字列 -> _i005
+        {"x": 70, "y": 70, "width": 10, "height": 10, "index": 5},     # 正規の index 5 -> sprite_005 (横取りされず取得可能！)
     ]
 
     res = crop_and_save_sub_images(path, boxes, output_dir=str(out_dir), prefix="sprite")
 
-    assert res["saved_count"] == 6
+    assert res["saved_count"] == 7
     filenames = [os.path.basename(f["path"]) for f in res["files"]]
     assert filenames == [
         "sprite_003.png",
         "sprite_007.png",
         "sprite_003_dup1.png",
-        "sprite_003_dup2.png",
-        "sprite_004.png",
+        "sprite_i003.png",
+        "sprite_i004.png",
+        "sprite_i005.png",
         "sprite_005.png",
     ]
-    assert len(set(filenames)) == 6
+    assert len(set(filenames)) == 7
 
     # 2回目の実行 (overwrite=False: デフォルト): ディスク上の既存ファイルと衝突せず _dup が付くこと
     res_second = crop_and_save_sub_images(
@@ -350,7 +352,7 @@ def test_crop_index_preservation_and_collision_resolution(tmp_path):
         prefix="sprite"
     )
     second_filename = os.path.basename(res_second["files"][0]["path"])
-    assert second_filename == "sprite_003_dup3.png"
+    assert second_filename == "sprite_003_dup2.png"
 
     # 3回目の実行 (overwrite=True): 既存ファイルに直接上書きされること
     res_overwrite = crop_and_save_sub_images(
@@ -422,31 +424,49 @@ def _reference_find_boxes(mask, padding, min_size):
 
 
 def test_roi_consistency_with_reference(tmp_path):
-    # ランダムなスプライトを多数配置し、ROI 方式と旧実装の出力が 100% 一致することを検証
+    # 1. 透過PNG: 画像端に接するスプライト（左上・右上・左下・右下）を含めた配置
     np.random.seed(42)
-    img = np.zeros((300, 300, 4), dtype=np.uint8)
-    for _ in range(30):
+    img_alpha = np.zeros((300, 300, 4), dtype=np.uint8)
+    img_alpha[0:20, 0:20] = (255, 255, 255, 255)       # 左上端
+    img_alpha[0:20, 280:300] = (255, 255, 255, 255)   # 右上端
+    img_alpha[280:300, 0:20] = (255, 255, 255, 255)   # 左下端
+    img_alpha[280:300, 280:300] = (255, 255, 255, 255) # 右下端
+    for _ in range(25):
         w = np.random.randint(8, 25)
         h = np.random.randint(8, 25)
         x = np.random.randint(0, 300 - w)
         y = np.random.randint(0, 300 - h)
-        img[y:y+h, x:x+w] = (255, 255, 255, 255)
+        img_alpha[y:y+h, x:x+w] = (255, 255, 255, 255)
 
-    path = _save(tmp_path, img, "roi_test.png")
+    path_alpha = _save(tmp_path, img_alpha, "roi_alpha.png")
 
     for pad in [0, 1, 3]:
-        roi_result = find_sub_image_boxes(path, min_size=8, padding=pad)
-        alpha = img[:, :, 3]
+        roi_result = find_sub_image_boxes(path_alpha, min_size=8, padding=pad)
+        alpha = img_alpha[:, :, 3]
         _, mask = cv2.threshold(alpha, 10, 255, cv2.THRESH_BINARY)
         ref_boxes = _reference_find_boxes(mask, padding=pad, min_size=8)
 
-        # 個数の一致
+        # 個数と全ボックスの座標・サイズの一致
         assert roi_result["count"] == len(ref_boxes)
-        # 全ボックスの座標とサイズの一致
         roi_sorted = sorted(roi_result["boxes"], key=lambda b: (b["y"], b["x"]))
         for b_roi, b_ref in zip(roi_sorted, ref_boxes):
             assert (b_roi["x"], b_roi["y"], b_roi["width"], b_roi["height"]) == \
                    (b_ref["x"], b_ref["y"], b_ref["width"], b_ref["height"])
+
+    # 2. マゼンタ単色背景 (BGR: 255, 0, 255) で端点接地スプライトの検証 (四隅頂点以外の端に配置)
+    img_mag = np.full((200, 200, 3), (255, 0, 255), dtype=np.uint8)
+    img_mag[0:15, 5:25] = (0, 255, 0)          # 上端に接地
+    img_mag[50:70, 0:20] = (0, 255, 0)          # 左端に接地
+    img_mag[100:130, 120:150] = (0, 0, 255)
+    path_mag = _save(tmp_path, img_mag, "roi_magenta.png")
+    res_mag = find_sub_image_boxes(path_mag, min_size=5, bg_mode="auto")
+    assert res_mag["count"] == 3
+    # 上端接地の y=0 と左端接地の x=0 が正確に取れること
+    ys = [b["y"] for b in res_mag["boxes"]]
+    xs = [b["x"] for b in res_mag["boxes"]]
+    assert 0 in ys
+    assert 0 in xs
+
 
 
 

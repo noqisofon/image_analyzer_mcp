@@ -370,17 +370,25 @@ def crop_and_save_sub_images(
 
         cropped = img[by:by2, bx:bx2]
 
-        # box の index を優先使用。負数、非整数 float、数値化不可の場合はループインデックス i に安全にフォールバック
-        raw_idx = box.get("index", i)
-        try:
-            if isinstance(raw_idx, float) and not raw_idx.is_integer():
-                raise ValueError("non-integer float")
-            file_idx = int(raw_idx)
-            if file_idx < 0:
-                raise ValueError("negative index")
-            base_filename = f"{safe_prefix}_{file_idx:03d}.png"
-        except (ValueError, TypeError):
-            base_filename = f"{safe_prefix}_{i:03d}.png"
+        # box の index を優先使用。負数、非整数 float、数値化不可の場合はループインデックス _i{i:03d} にフォールバックして正規番号の横取りを防止
+        raw_idx = box.get("index", None)
+        valid_idx = None
+        if raw_idx is not None:
+            try:
+                if isinstance(raw_idx, float) and not raw_idx.is_integer():
+                    raise ValueError("non-integer float")
+                v = int(raw_idx)
+                if v >= 0:
+                    valid_idx = v
+            except (ValueError, TypeError):
+                pass
+
+        if valid_idx is not None:
+            base_filename = f"{safe_prefix}_{valid_idx:03d}.png"
+            assigned_idx = valid_idx
+        else:
+            base_filename = f"{safe_prefix}_i{i:03d}.png"
+            assigned_idx = i
 
         # ファイル名重複時の衝突回避 (_dup1, _dup2 ...)
         filename = base_filename
@@ -395,7 +403,7 @@ def crop_and_save_sub_images(
 
         if save_image_safely(out_path, cropped):
             saved_files.append({
-                "index": raw_idx,
+                "index": assigned_idx,
                 "path": out_path,
                 "width": int(bx2 - bx),
                 "height": int(by2 - by)
