@@ -468,6 +468,127 @@ def test_roi_consistency_with_reference(tmp_path):
     assert 0 in xs
 
 
+def test_find_sub_image_boxes_default_min_size(tmp_path):
+    # min_size 未指定（デフォルト8）で 10x10 は検出され、6x6 は除外される
+    img = np.zeros((100, 100, 4), dtype=np.uint8)
+    img[10:20, 10:20] = (255, 255, 255, 255)  # 10x10
+    img[40:46, 40:46] = (255, 255, 255, 255)  # 6x6
+    path = _save(tmp_path, img, "min_size.png")
+
+    res = find_sub_image_boxes(path, padding=0)
+    assert res["count"] == 1
+    assert res["boxes"][0]["width"] == 10
+    assert res["boxes"][0]["height"] == 10
+
+
+def test_merged_components_warning_on_large_canvas(tmp_path):
+    # 1024x1024 の広いキャンバス: 16x16 の小物が6個 (中央値 256) と 80x80 の融合ボックス (面積 6400 = 25倍)
+    # 画面占有率は 6400 / 1048576 = 0.61%（5%ルールでは見逃すケース）だが中央値比で確実に警告が付く
+    img = np.zeros((1024, 1024, 4), dtype=np.uint8)
+    for i in range(6):
+        x = 50 + i * 40
+        img[50:66, x:x+16] = (255, 255, 255, 255)
+    img[300:380, 300:380] = (255, 255, 255, 255)  # 80x80
+    path = _save(tmp_path, img, "large_canvas.png")
+
+    res = find_sub_image_boxes(path, padding=0)
+    assert res["count"] == 7
+    assert res["median_area"] == 256.0
+    assert res["warnings_count"] == 1
+
+    large_box = [b for b in res["boxes"] if b["width"] == 80 and b["height"] == 80][0]
+    assert large_box["area_ratio_to_median"] == 25.0
+    assert large_box["warning"] == "possible_merged_components"
+
+    small_boxes = [b for b in res["boxes"] if b["width"] == 16 and b["height"] == 16]
+    for sb in small_boxes:
+        assert "warning" not in sb
+        assert sb["area_ratio_to_median"] == 1.0
+
+
+def test_no_false_positive_warning_on_single_large_sprite(tmp_path):
+    # 256x256 キャンバス: 64x64 の単体大物スプライト (面積 4096 = 画面占有率 6.25%) と 16x16 の小物 6個
+    # 画面占有率 5% ルールでは誤判定されるが、中央値比は 4096 / 256 = 16.0 (< 20.0) のため誤警告が付かない
+    img = np.zeros((256, 256, 4), dtype=np.uint8)
+    for i in range(6):
+        x = 20 + i * 30
+        img[20:36, x:x+16] = (255, 255, 255, 255)
+    img[100:164, 100:164] = (255, 255, 255, 255)  # 64x64
+    path = _save(tmp_path, img, "single_large.png")
+
+    res = find_sub_image_boxes(path, padding=0)
+    assert res["count"] == 7
+    assert res["median_area"] == 256.0
+    assert res["warnings_count"] == 0
+
+    large_box = [b for b in res["boxes"] if b["width"] == 64 and b["height"] == 64][0]
+    assert large_box["area_ratio_to_median"] == 16.0
+    assert "warning" not in large_box
+
+
+def test_entire_image_or_wrong_bg_warning(tmp_path):
+    # 300x300 キャンバス (90000 px²): 285x285 の巨大ボックス (81225 px² = 90.25%) と 9x9 の小物 5個
+    # 巨大ボックスは画面90%以上の警告を受け、中央値計算から除外される
+    img = np.zeros((300, 300, 4), dtype=np.uint8)
+    img[0:285, 0:285] = (255, 255, 255, 255)  # 285x285
+    for i in range(5):
+        y = 10 + i * 30
+        img[y:y+9, 290:299] = (255, 255, 255, 255)  # 9x9
+    path = _save(tmp_path, img, "giant_box.png")
+
+    res = find_sub_image_boxes(path, padding=0)
+    assert res["count"] == 6
+    assert res["median_area"] == 81.0
+    assert res["warnings_count"] == 1
+
+    giant_box = [b for b in res["boxes"] if b["width"] == 285 and b["height"] == 285][0]
+    assert giant_box["warning"] == "entire_image_or_wrong_bg"
+
+
+def test_custom_merged_threshold_ratio(tmp_path):
+    # 10x10 の小物 5個 (中央値 100) と 22x22 の小規模融合ボックス (面積 484 = 4.84倍)
+    # デフォルト (20.0) では警告されないが、merged_threshold_ratio=4.0 を指定すると警告が付与される
+    img = np.zeros((200, 200, 4), dtype=np.uint8)
+    for i in range(5):
+        x = 10 + i * 20
+        img[10:20, x:x+10] = (255, 255, 255, 255)
+    img[60:82, 60:82] = (255, 255, 255, 255)  # 22x22
+    path = _save(tmp_path, img, "threshold_param.png")
+
+    # デフォルト
+    res_def = find_sub_image_boxes(path, padding=0)
+    target_box = [b for b in res_def["boxes"] if b["width"] == 22 and b["height"] == 22][0]
+    assert target_box["area_ratio_to_median"] == 4.84
+    assert "warning" not in target_box
+
+    # merged_threshold_ratio=4.0
+    res_custom = find_sub_image_boxes(path, padding=0, merged_threshold_ratio=4.0)
+    target_box_warned = [b for b in res_custom["boxes"] if b["width"] == 22 and b["height"] == 22][0]
+    assert target_box_warned["warning"] == "possible_merged_components"
+    assert res_custom["warnings_count"] == 1
+
+
+def test_preview_boxes_cyan_warning_and_styling(tmp_path):
+    # 通常ボックス (緑) と警告付きボックス (シアン) を含むプレビュー描画テスト
+    img = np.zeros((100, 100, 3), dtype=np.uint8)
+    path = _save(tmp_path, img, "preview_test.png")
+    out_path = str(tmp_path / "out_preview.png")
+
+    boxes = [
+        {"x": 10, "y": 10, "width": 20, "height": 20, "index": 0},
+        {"x": 50, "y": 50, "width": 30, "height": 30, "index": 1, "warning": "possible_merged_components"}
+    ]
+    res = preview_boxes(path, boxes, output_path=out_path, show_labels=True)
+    assert os.path.isfile(out_path)
+
+    preview_img = cv2.imread(out_path)
+    # 通常ボックス (x=10..30, y=10) の枠線上の画素に緑 (0, 255, 0) が含まれること
+    assert np.any(preview_img[10, 10:30] == (0, 255, 0))
+    # 警告ボックス (x=50..80, y=50) の枠線上の画素にシアン (255, 255, 0) が含まれること
+    assert np.any(preview_img[50, 50:80] == (255, 255, 0))
+
+
+
 
 
 

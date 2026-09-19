@@ -58,22 +58,29 @@ def get_image_info(image_path: str) -> dict:
 @mcp.tool()
 def find_sub_image_boxes(
     image_path: str,
-    min_size: int = 16,
+    min_size: int = 8,
     padding: int = 2,
     bg_mode: str = "auto",
     bg_color: list[int] | None = None,
-    tolerance: int = 20
+    tolerance: int = 20,
+    merged_threshold_ratio: float = 20.0
 ) -> dict:
     """
     画像内の独立したサブ画像（スプライト、コラージュ要素）のバウンディングボックス(x, y, width, height)を検出します。
 
     Parameters:
         image_path: 解析する画像ファイルのパス
-        min_size: 検出対象とする最小幅・最小高さ(px)
+        min_size: 検出対象とする最小幅・最小高さ(px)。デフォルトは8（16pxタイルセット文化における8x8〜16x16の小物を拾いやすくするため）。透過画像の微小なゴミや影を除外したい場合は16や32などの大きめの値を指定してください。
         padding: 離れたパーツ（頭と胴体など）を同一オブジェクトとしてまとめる膨張サイズ(px)
         bg_mode: 背景判定モード ('auto', 'transparent', 'white', 'black', 'color')
         bg_color: 明示的な背景色指定 [R, G, B] (0-255)。bg_mode='color' または指定時に使用
         tolerance: 単色背景との色の許容差(0-255)
+        merged_threshold_ratio: 中央値に対する面積比の閾値（デフォルト20.0）。これを超えるボックスに warning='possible_merged_components' を付与します。小さな融合も検出したい場合は 4.0 など小さな値を指定可能です。
+
+    注意:
+        警告フラグ (warning) が付いていないボックスであっても、完全に単一オブジェクトに分離されていることを
+        保証するものではありません（数個の小物が融合していても面積比が閾値未満の場合は検知できません）。
+        密集したスプライトシートでは preview_boxes による目視確認や、等間隔タイルの場合は get_grid_boxes の併用を推奨します。
     """
     img = load_image_safely(image_path)
     if img is None:
@@ -242,9 +249,38 @@ def find_sub_image_boxes(
     for idx, b in enumerate(boxes):
         b["index"] = idx
 
+    img_area = int(w * h)
+    # 画像の90%以上を占める巨大ボックスは中央値計算から除外
+    valid_boxes = [b for b in boxes if (b["width"] * b["height"]) < 0.90 * img_area]
+
+    median_area = None
+    if len(valid_boxes) >= 5:
+        median_area = round(float(np.median([b["width"] * b["height"] for b in valid_boxes])), 2)
+
+    warnings_count = 0
+    for b in boxes:
+        box_area = b["width"] * b["height"]
+        if median_area is not None and median_area > 0:
+            b["area_ratio_to_median"] = round(float(box_area) / median_area, 2)
+        else:
+            b["area_ratio_to_median"] = None
+
+        if box_area >= 0.90 * img_area:
+            b["warning"] = "entire_image_or_wrong_bg"
+            warnings_count += 1
+        elif (
+            merged_threshold_ratio > 0
+            and b["area_ratio_to_median"] is not None
+            and b["area_ratio_to_median"] >= merged_threshold_ratio
+        ):
+            b["warning"] = "possible_merged_components"
+            warnings_count += 1
+
     return {
         "image_size": {"width": int(w), "height": int(h)},
         "count": len(boxes),
+        "median_area": median_area,
+        "warnings_count": warnings_count,
         "boxes": boxes
     }
 
@@ -454,9 +490,10 @@ def preview_boxes(
     else:
         preview = img.copy()
 
-    box_color = (0, 255, 0, 255) if channels == 4 else (0, 255, 0)
-    label_bg_color = (0, 0, 0, 200) if channels == 4 else (0, 0, 0)
-    label_text_color = (255, 255, 255, 255) if channels == 4 else (255, 255, 255)
+    normal_box_color = (0, 255, 0, 255) if channels == 4 else (0, 255, 0)
+    warning_box_color = (255, 255, 0, 255) if channels == 4 else (255, 255, 0)  # Cyan
+    stroke_color = (0, 0, 0, 255) if channels == 4 else (0, 0, 0)
+    fill_color = (255, 255, 255, 255) if channels == 4 else (255, 255, 255)
 
     drawn_count = 0
     for i, box in enumerate(boxes):
@@ -465,34 +502,58 @@ def preview_boxes(
         bw = int(box.get("width", 0))
         bh = int(box.get("height", 0))
         idx = box.get("index", i)
+        has_warning = bool(box.get("warning"))
 
         if bw <= 0 or bh <= 0:
             continue
 
-        cv2.rectangle(preview, (bx, by), (bx + bw, by + bh), box_color, line_thickness)
+        cur_box_color = warning_box_color if has_warning else normal_box_color
+        cur_thickness = (line_thickness + 1) if has_warning else line_thickness
+
+        cv2.rectangle(preview, (bx, by), (bx + bw, by + bh), cur_box_color, cur_thickness)
         drawn_count += 1
 
         if show_labels:
-            label = f"#{idx}"
+            is_small = (bw < 24 or bh < 20)
             font = cv2.FONT_HERSHEY_SIMPLEX
-            font_scale = 0.45
-            font_thickness = 1
+            font_scale = 0.30 if is_small else 0.40
 
-            (tw, th), baseline = cv2.getTextSize(label, font, font_scale, font_thickness)
-            label_y1 = max(0, by - th - baseline - 4)
-            label_y2 = label_y1 + th + baseline + 4
-            label_x1 = max(0, bx)
-            label_x2 = min(w, label_x1 + tw + 6)
+            if has_warning:
+                label = f"!#{idx}"
+            elif is_small:
+                label = f"{idx}"
+            else:
+                label = f"#{idx}"
 
-            cv2.rectangle(preview, (label_x1, label_y1), (label_x2, label_y2), label_bg_color, -1)
+            (tw, th), baseline = cv2.getTextSize(label, font, font_scale, 1)
+
+            # 極小ボックスかつ上部にスペースがある場合は外側上部、それ以外は内側左上
+            if is_small and by >= th + 3:
+                tx = max(0, bx)
+                ty = by - 2
+            else:
+                tx = max(0, bx + 1)
+                ty = min(h - 1, by + th + 1)
+
+            # 黒縁取り(stroke=3) + 白文字(stroke=1)の2パス描画（絵柄を覆い隠さず視認性を確保）
             cv2.putText(
                 preview,
                 label,
-                (label_x1 + 3, label_y1 + th + 2),
+                (tx, ty),
                 font,
                 font_scale,
-                label_text_color,
-                font_thickness,
+                stroke_color,
+                3,
+                lineType=cv2.LINE_AA
+            )
+            cv2.putText(
+                preview,
+                label,
+                (tx, ty),
+                font,
+                font_scale,
+                fill_color,
+                1,
                 lineType=cv2.LINE_AA
             )
 
