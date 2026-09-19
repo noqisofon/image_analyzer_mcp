@@ -20,12 +20,12 @@ AI エージェント（Antigravity、Claude 等）が画像の全体サイズ�
 
 ## 提供ツール一覧
 
-| ツール名 | 説明 | 主なパラメータ |
-|---|---|---|
-| `get_image_info` | 画像の全体サイズやメタデータを取得 | `image_path` |
-| `find_sub_image_boxes` | スプライト・コラージュ要素の境界ボックスを検出 | `image_path`, `min_size` (最小サイズpx), `padding` (結合サイズpx), `bg_mode` (`auto`, `transparent`, `white`, `black`) |
-| `get_grid_boxes` | 等間隔スプライトシートのグリッド分割 | `image_path`, `rows`/`cols` または `tile_width`/`tile_height`, `margin_x`, `margin_y`, `spacing_x`, `spacing_y` |
-| `crop_and_save_sub_images` | ボックス範囲で切り出して連番保存 | `image_path`, `boxes`, `output_dir`, `prefix` |
+| ツール名                   | 説明                                           | 主なパラメータ                                                                                                         |
+| -------------------------- | ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `get_image_info`           | 画像の全体サイズやメタデータを取得             | `image_path`                                                                                                           |
+| `find_sub_image_boxes`     | スプライト・コラージュ要素の境界ボックスを検出 | `image_path`, `min_size` (最小サイズpx), `padding` (結合サイズpx), `bg_mode` (`auto`, `transparent`, `white`, `black`) |
+| `get_grid_boxes`           | 等間隔スプライトシートのグリッド分割           | `image_path`, `rows`/`cols` または `tile_width`/`tile_height`, `margin_x`, `margin_y`, `spacing_x`, `spacing_y`        |
+| `crop_and_save_sub_images` | ボックス範囲で切り出して連番保存               | `image_path`, `boxes`, `output_dir`, `prefix`                                                                          |
 
 ---
 
