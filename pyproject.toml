@@ -1,0 +1,21 @@
+[project]
+name = "image-analyzer-mcp"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "noqisofon", email = "ned.rihine@gmail.com" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "mcp>=2.2.0",
+    "numpy>=2.5.3",
+    "opencv-python>=5.0.0.93",
+]
+
+[project.scripts]
+image-analyzer-mcp = "image_analyzer_mcp:main"
+
+[build-system]
+requires = ["uv_build>=0.12.13,<0.13.0"]
+build-backend = "uv_build"
