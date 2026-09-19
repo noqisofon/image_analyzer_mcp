@@ -1,2 +1,3 @@
-def main() -> None:
-    print("Hello from image-analyzer-mcp!")
+from .index import main, mcp
+
+__all__ = ["main", "mcp"]

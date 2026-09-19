@@ -1,35 +1,259 @@
-# image_analyzer_mcp.py
+import os
 import cv2
 import numpy as np
-from mcp.server.fastmcp import FastMCP
+try:
+    # mcp >= 2.0
+    from mcp.server.mcpserver import MCPServer as FastMCP
+except ImportError:
+    # mcp < 2.0
+    from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("Image Sprite Analyzer")
 
+def load_image_safely(image_path: str):
+    """Windowsの日本語パスにも対応した安全な画像読み込み"""
+    if not os.path.isfile(image_path):
+        return None
+    try:
+        data = np.fromfile(image_path, dtype=np.uint8)
+        return cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
+    except Exception:
+        return None
+
+def save_image_safely(image_path: str, img: np.ndarray) -> bool:
+    """Windowsの日本語パスにも対応した安全な画像保存"""
+    try:
+        ext = os.path.splitext(image_path)[1]
+        if not ext:
+            ext = ".png"
+            image_path += ext
+        success, encoded = cv2.imencode(ext, img)
+        if success:
+            encoded.tofile(image_path)
+            return True
+        return False
+    except Exception:
+        return False
+
 @mcp.tool()
-def find_sub_image_boxes(image_path: str, min_size: int = 16) -> list[dict]:
-    """画像内の独立したサブ画像のバウンディングボックス(x, y, w, h)を検出します。"""
-    img = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
+def get_image_info(image_path: str) -> dict:
+    """
+    画像の全体サイズ（width, height, channels）やフォーマット情報を素早く取得します。
+    """
+    img = load_image_safely(image_path)
     if img is None:
-        raise ValueError("画像が読み込めません")
+        raise ValueError(f"画像を読み込めませんでした: {image_path}")
 
-    # 透過PNGならアルファチャンネル、それ以外は二値化して輪郭抽出
-    if img.shape[2] == 4:
-        mask = img[:, :, 3]
+    h, w = img.shape[:2]
+    channels = img.shape[2] if len(img.shape) > 2 else 1
+
+    return {
+        "width": int(w),
+        "height": int(h),
+        "channels": int(channels),
+        "has_alpha": bool(channels == 4),
+        "file_size_bytes": os.path.getsize(image_path),
+    }
+
+@mcp.tool()
+def find_sub_image_boxes(
+    image_path: str,
+    min_size: int = 16,
+    padding: int = 2,
+    bg_mode: str = "auto"
+) -> dict:
+    """
+    画像内の独立したサブ画像（スプライト、コラージュ要素）のバウンディングボックス(x, y, width, height)を検出します。
+
+    Parameters:
+        image_path: 解析する画像ファイルのパス
+        min_size: 検出対象とする最小幅・最小高さ(px)
+        padding: 離れたパーツ（頭と胴体など）を同一オブジェクトとしてまとめる膨張サイズ(px)
+        bg_mode: 背景判定モード ('auto', 'transparent', 'white', 'black')
+    """
+    img = load_image_safely(image_path)
+    if img is None:
+        raise ValueError(f"画像を読み込めませんでした: {image_path}")
+
+    h, w = img.shape[:2]
+    channels = img.shape[2] if len(img.shape) > 2 else 1
+
+    # マスクの作成
+    if channels == 4 and (bg_mode in ("auto", "transparent")):
+        # アルファチャンネルが0より大きい部分を物体とする
+        alpha = img[:, :, 3]
+        _, mask = cv2.threshold(alpha, 10, 255, cv2.THRESH_BINARY)
     else:
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        _, mask = cv2.threshold(gray, 245, 255, cv2.THRESH_BINARY_INV)
+        if channels >= 3:
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = img
 
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if bg_mode == "auto":
+            # 四隅のピクセル輝度の平均から白背景か黒背景かを判定
+            corners = [int(gray[0, 0]), int(gray[0, -1]), int(gray[-1, 0]), int(gray[-1, -1])]
+            is_light_bg = (sum(corners) / 4) > 127
+        else:
+            is_light_bg = (bg_mode == "white")
 
-    results = []
+        if is_light_bg:
+            _, mask = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY_INV)
+        else:
+            _, mask = cv2.threshold(gray, 15, 255, cv2.THRESH_BINARY)
+
+    # 近接パーツを結合するための膨張処理
+    if padding > 0:
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (padding * 2 + 1, padding * 2 + 1))
+        dilated_mask = cv2.dilate(mask, kernel, iterations=1)
+    else:
+        dilated_mask = mask
+
+    contours, _ = cv2.findContours(dilated_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    boxes = []
     for c in contours:
-        x, y, w, h = cv2.boundingRect(c)
-        if w >= min_size and h >= min_size:
-            results.append({"x": int(x), "y": int(y), "width": int(w), "height": int(h)})
+        x, y, bw, bh = cv2.boundingRect(c)
+        if bw >= min_size and bh >= min_size:
+            boxes.append({
+                "x": int(x),
+                "y": int(y),
+                "width": int(bw),
+                "height": int(bh)
+            })
 
-    # 左上から順にソート
-    results.sort(key=lambda b: (b["y"] // 20, b["x"]))
-    return results
+    # 左上から順にソート（行ごとのブレを吸収するため平均高さの半分程度でクラスタリング）
+    avg_h = (sum(b["height"] for b in boxes) / len(boxes)) if boxes else 20
+    row_height = max(16, int(avg_h * 0.7))
+    boxes.sort(key=lambda b: (b["y"] // row_height, b["x"]))
+
+    for idx, b in enumerate(boxes):
+        b["index"] = idx
+
+    return {
+        "image_size": {"width": int(w), "height": int(h)},
+        "count": len(boxes),
+        "boxes": boxes
+    }
+
+@mcp.tool()
+def get_grid_boxes(
+    image_path: str,
+    rows: int = 0,
+    cols: int = 0,
+    tile_width: int = 0,
+    tile_height: int = 0,
+    margin_x: int = 0,
+    margin_y: int = 0,
+    spacing_x: int = 0,
+    spacing_y: int = 0
+) -> dict:
+    """
+    規則的に並んでいる等間隔スプライトシートを格子状（グリッド）に分割したバウンディングボックスを算出します。
+    rows/cols 指定、または tile_width/tile_height 指定のどちらでも利用可能です。
+    """
+    img = load_image_safely(image_path)
+    if img is None:
+        raise ValueError(f"画像を読み込めませんでした: {image_path}")
+
+    h, w = img.shape[:2]
+
+    # rows / cols または tile_width / tile_height の算出
+    if rows > 0 and cols > 0:
+        avail_w = w - margin_x * 2 - spacing_x * (cols - 1)
+        avail_h = h - margin_y * 2 - spacing_y * (rows - 1)
+        tw = avail_w // cols
+        th = avail_h // rows
+    elif tile_width > 0 and tile_height > 0:
+        tw = tile_width
+        th = tile_height
+        cols = (w - margin_x * 2 + spacing_x) // (tw + spacing_x)
+        rows = (h - margin_y * 2 + spacing_y) // (th + spacing_y)
+    else:
+        raise ValueError("rows と cols、または tile_width と tile_height のいずれかの組み合わせを指定してください。")
+
+    if tw <= 0 or th <= 0 or rows <= 0 or cols <= 0:
+        raise ValueError("計算されたタイルのサイズまたは行・列数が不正です。マージンや間隔の設定を確認してください。")
+
+    boxes = []
+    idx = 0
+    for r in range(rows):
+        for c in range(cols):
+            x = margin_x + c * (tw + spacing_x)
+            y = margin_y + r * (th + spacing_y)
+            boxes.append({
+                "index": idx,
+                "row": r,
+                "col": c,
+                "x": int(x),
+                "y": int(y),
+                "width": int(tw),
+                "height": int(th)
+            })
+            idx += 1
+
+    return {
+        "image_size": {"width": int(w), "height": int(h)},
+        "grid": {
+            "rows": int(rows),
+            "cols": int(cols),
+            "tile_width": int(tw),
+            "tile_height": int(th)
+        },
+        "count": len(boxes),
+        "boxes": boxes
+    }
+
+@mcp.tool()
+def crop_and_save_sub_images(
+    image_path: str,
+    boxes: list[dict],
+    output_dir: str,
+    prefix: str = "sub_image"
+) -> dict:
+    """
+    検出・指定したバウンディングボックスのリストを元に、元画像から個別の画像を切り出して指定ディレクトリに保存します。
+    """
+    img = load_image_safely(image_path)
+    if img is None:
+        raise ValueError(f"画像を読み込めませんでした: {image_path}")
+
+    h, w = img.shape[:2]
+    os.makedirs(output_dir, exist_ok=True)
+
+    saved_files = []
+    for i, box in enumerate(boxes):
+        bx = max(0, int(box.get("x", 0)))
+        by = max(0, int(box.get("y", 0)))
+        bw = int(box.get("width", 0))
+        bh = int(box.get("height", 0))
+
+        # 範囲クリッピング
+        bx2 = min(w, bx + bw)
+        by2 = min(h, by + bh)
+
+        if bx2 <= bx or by2 <= by:
+            continue
+
+        cropped = img[by:by2, bx:bx2]
+        filename = f"{prefix}_{i:03d}.png"
+        out_path = os.path.join(output_dir, filename)
+
+        if save_image_safely(out_path, cropped):
+            saved_files.append({
+                "index": i,
+                "path": out_path,
+                "width": int(bx2 - bx),
+                "height": int(by2 - by)
+            })
+
+    return {
+        "saved_count": len(saved_files),
+        "output_directory": os.path.abspath(output_dir),
+        "files": saved_files
+    }
+
+def main():
+    mcp.run()
 
 if __name__ == "__main__":
-    mcp.run()
+    main()
